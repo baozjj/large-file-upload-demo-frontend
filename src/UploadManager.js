@@ -2,79 +2,72 @@ import axios from 'axios';
 import SparkMD5 from 'spark-md5';
 
 class UploadManager {
-  constructor(domainList, concurrency = 6) {
-    this.domainList = domainList;
-    this.concurrency = concurrency;
-    this.queue = [];
-    this.activeCount = 0;
-    this.totalSize = 0;
-    this.uploadedSize = 0;
-    this.onProgress = null;
-    this.onComplete = null;
-    this.chunkSize = 2 * 1024 * 1024; // 2MB per chunk
-    this.fileHash = null;
-    this.fileName = null;
+  constructor(domainList, concurrency = 6, chunkSize = 2 * 1024 * 1024) {
+    this.domainList = domainList; // 域名列表
+    this.concurrency = concurrency; // 并发数
+    this.queue = []; // 任务队列
+    this.activeCount = 0; // 当前活跃的请求数
+    this.totalSize = 0; // 文件总大小
+    this.uploadedSize = 0; // 已上传大小
+    this.onProgress = null; // 进度回调
+    this.onComplete = null; // 完成回调
+    this.onAllChunksUploaded = null; // 所有分片上传完毕回调（未合并）
+    this.chunkSize = chunkSize; // 每个分片大小，默认为 2MB
+    this.fileHash = null; // 文件哈希
+    this.fileName = null; // 文件名
   }
 
+  /**
+   * 开始上传文件
+   * @param {File} file - 要上传的文件对象
+   */
   async upload(file) {
     this.totalSize = file.size;
     this.uploadedSize = 0;
     this.fileName = file.name;
 
-    // Calculate hash first
-    console.log('Calculating file hash...');
+    // 先计算哈希
+    console.log('正在计算文件哈希...');
     this.fileHash = await this.calculateHash(file);
-    console.log('File Hash:', this.fileHash);
+    console.log('文件哈希:', this.fileHash);
 
     const chunks = this.createChunks(file);
     
-    // Create tasks for each chunk
+    // 为每个分片创建任务
     const tasks = chunks.map((chunk, index) => {
+      // 轮询策略：根据分片索引取模，决定使用哪个域名
       const domainIndex = index % this.domainList.length;
       const domain = this.domainList[domainIndex];
       return () => this.uploadChunk(chunk, index, domain);
     });
 
-    // Add tasks to queue
+    // 添加任务到队列
     this.queue.push(...tasks);
     
-    // Start processing
+    // 开始处理
     this.processQueue();
   }
 
-  calculateHash(file) {
-    return new Promise((resolve, reject) => {
-      const spark = new SparkMD5.ArrayBuffer();
-      const reader = new FileReader();
-      const chunkSize = 2 * 1024 * 1024; // Read in 2MB chunks for hashing
-      const chunks = Math.ceil(file.size / chunkSize);
-      let currentChunk = 0;
-
-      reader.onload = (e) => {
-        spark.append(e.target.result);
-        currentChunk++;
-
-        if (currentChunk < chunks) {
-          loadNext();
-        } else {
-          resolve(spark.end());
-        }
-      };
-
-      reader.onerror = (e) => {
-        reject(e);
-      };
-
-      function loadNext() {
-        const start = currentChunk * chunkSize;
-        const end = ((start + chunkSize) >= file.size) ? file.size : start + chunkSize;
-        reader.readAsArrayBuffer(file.slice(start, end));
-      }
-
-      loadNext();
+  /**
+   * 计算文件哈希 (简单版：时间戳 + 文件名)
+   * @param {File} file - 文件对象
+   * @returns {Promise<string>} - 文件哈希值
+   */
+  async calculateHash(file) {
+    // 为了演示性能，改为简单的 hash 生成方式
+    // 实际生产中应使用文件内容 hash (如 spark-md5)
+    return new Promise((resolve) => {
+        const spark = new SparkMD5();
+        spark.append(file.name + Date.now().toString());
+        resolve(spark.end());
     });
   }
 
+  /**
+   * 将文件切分为分片
+   * @param {File} file - 文件对象
+   * @returns {Blob[]} - 分片数组
+   */
   createChunks(file) {
     const chunks = [];
     let start = 0;
@@ -85,6 +78,9 @@ class UploadManager {
     return chunks;
   }
 
+  /**
+   * 处理上传队列，控制并发数
+   */
   processQueue() {
     while (this.activeCount < this.concurrency && this.queue.length > 0) {
       const task = this.queue.shift();
@@ -96,19 +92,29 @@ class UploadManager {
     }
 
     if (this.activeCount === 0 && this.queue.length === 0) {
-      // All chunks uploaded, request merge
+      // 所有分片上传完毕，触发回调
+      if (this.onAllChunksUploaded) {
+        this.onAllChunksUploaded();
+      }
+      // 请求合并
       this.mergeRequest();
     }
   }
 
+  /**
+   * 上传单个分片
+   * @param {Blob} chunk - 分片数据
+   * @param {number} index - 分片索引
+   * @param {string} domain - 目标域名
+   */
   async uploadChunk(chunk, index, domain) {
     const formData = new FormData();
-    // Important: Backend requires fileHash and index BEFORE file
+    // 重要：后端需要在文件之前接收 fileHash 和 index
     formData.append('fileHash', this.fileHash);
     formData.append('index', index);
     formData.append('file', chunk);
 
-    console.log(`Uploading chunk ${index} to ${domain}`);
+    console.log(`正在上传分片 ${index} 到 ${domain}`);
 
     try {
       await axios.post(`${domain}/upload`, formData, {
@@ -123,29 +129,32 @@ class UploadManager {
         this.onProgress(this.uploadedSize / this.totalSize);
       }
     } catch (error) {
-      console.error(`Failed to upload chunk ${index} to ${domain}:`, error);
-      // For this demo, simply logging error. In production, retry logic is needed.
-      // Re-queueing logic would go here.
+      console.error(`上传分片 ${index} 到 ${domain} 失败:`, error);
+      // 本演示仅打印错误。在生产环境中需要重试逻辑。
+      // 可以在此处添加重新入队逻辑。
     }
   }
 
+  /**
+   * 发送合并请求
+   */
   async mergeRequest() {
-      // Pick a domain to send merge request (e.g., the first one)
+      // 选择一个域名发送合并请求（例如第一个）
       const domain = this.domainList[0];
       try {
-          console.log('Requesting merge...');
+          console.log('正在请求合并...');
           const response = await axios.post(`${domain}/merge`, {
               fileHash: this.fileHash,
               filename: this.fileName
           }, {
               withCredentials: true
           });
-          console.log('Merge complete:', response.data);
+          console.log('合并完成:', response.data);
           if (this.onComplete) {
               this.onComplete(response.data);
           }
       } catch (error) {
-          console.error('Merge failed:', error);
+          console.error('合并失败:', error);
       }
   }
 }
