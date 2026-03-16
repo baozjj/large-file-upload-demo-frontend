@@ -44,9 +44,9 @@ const singleDomainList = ["https://u1.local.com:3000"];
 
 // 策略 B: 多域名 (域名分片)
 const multiDomainList = [
-  "https://u1.local.com:3000",
   "https://u2.local.com:3000",
   "https://u3.local.com:3000",
+  "https://u4.local.com:3000",
   // 如果 hosts/cert 支持，可以添加更多，浏览器通常限制每个域名的并发数
   // 但这里我们使用不同域名来绕过每个域名的限制。
 ];
